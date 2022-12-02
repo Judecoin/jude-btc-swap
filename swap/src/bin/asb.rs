@@ -1,0 +1,195 @@
+#![warn(
+    unused_extern_crates,
+    missing_copy_implementations,
+    rust_2018_idioms,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::fallible_impl_from,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::dbg_macro
+)]
+#![forbid(unsafe_code)]
+#![allow(non_snake_case)]
+
+use anyhow::{Context, Result};
+use prettytable::{row, Table};
+use std::{path::Path, sync::Arc};
+use structopt::StructOpt;
+use swap::{
+    asb::{
+        command::{Arguments, Command},
+        config::{
+            initial_setup, query_user_for_initial_testnet_config, read_config, Config,
+            ConfigNotInitialized,
+        },
+        kraken,
+    },
+    bitcoin,
+    database::Database,
+    execution_params,
+    execution_params::GetExecutionParams,
+    fs::default_config_path,
+    jude,
+    jude::{Amount, CreateWallet, OpenWallet},
+    protocol::alice::EventLoop,
+    seed::Seed,
+    trace::init_tracing,
+};
+use tracing::{info, warn};
+use tracing_subscriber::filter::LevelFilter;
+
+#[macro_use]
+extern crate prettytable;
+
+const DEFAULT_WALLET_NAME: &str = "asb-wallet";
+const BITCOIN_NETWORK: bitcoin::Network = bitcoin::Network::Testnet;
+const jude_NETWORK: jude::Network = jude::Network::Stagenet;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    init_tracing(LevelFilter::DEBUG).expect("initialize tracing");
+
+    let opt = Arguments::from_args();
+
+    let config_path = if let Some(config_path) = opt.config {
+        config_path
+    } else {
+        default_config_path()?
+    };
+
+    let config = match read_config(config_path.clone())? {
+        Ok(config) => config,
+        Err(ConfigNotInitialized {}) => {
+            initial_setup(config_path.clone(), query_user_for_initial_testnet_config)?;
+            read_config(config_path)?.expect("after initial setup config can be read")
+        }
+    };
+
+    info!(
+        "Database and Seed will be stored in directory: {}",
+        config.data.dir.display()
+    );
+
+    let db_path = config.data.dir.join("database");
+
+    let db = Database::open(config.data.dir.join(db_path).as_path())
+        .context("Could not open database")?;
+
+    let wallet_data_dir = config.data.dir.join("wallet");
+
+    match opt.cmd {
+        Command::Start { max_sell } => {
+            let seed = Seed::from_file_or_generate(&config.data.dir)
+                .expect("Could not retrieve/initialize seed");
+
+            let execution_params = execution_params::Testnet::get_execution_params();
+
+            let (bitcoin_wallet, jude_wallet) = init_wallets(
+                config.clone(),
+                &wallet_data_dir,
+                seed.extended_private_key(BITCOIN_NETWORK)?.private_key,
+            )
+            .await?;
+
+            info!(
+                "BTC deposit address: {}",
+                bitcoin_wallet.new_address().await?
+            );
+
+            let rate_service = kraken::RateService::new().await?;
+
+            let (mut event_loop, _) = EventLoop::new(
+                config.network.listen,
+                seed,
+                execution_params,
+                Arc::new(bitcoin_wallet),
+                Arc::new(jude_wallet),
+                Arc::new(db),
+                rate_service,
+                max_sell,
+            )
+            .unwrap();
+
+            info!("Our peer id is {}", event_loop.peer_id());
+
+            event_loop.run().await;
+        }
+        Command::History => {
+            let mut table = Table::new();
+
+            table.add_row(row!["SWAP ID", "STATE"]);
+
+            for (swap_id, state) in db.all()? {
+                table.add_row(row![swap_id, state]);
+            }
+
+            // Print the table to stdout
+            table.printstd();
+        }
+    };
+
+    Ok(())
+}
+
+async fn init_wallets(
+    config: Config,
+    bitcoin_wallet_data_dir: &Path,
+    private_key: ::bitcoin::PrivateKey,
+) -> Result<(bitcoin::Wallet, jude::Wallet)> {
+    let bitcoin_wallet = bitcoin::Wallet::new(
+        config.bitcoin.electrum_rpc_url,
+        config.bitcoin.electrum_http_url,
+        BITCOIN_NETWORK,
+        bitcoin_wallet_data_dir,
+        private_key,
+    )
+    .await?;
+
+    bitcoin_wallet
+        .sync_wallet()
+        .await
+        .expect("Could not sync btc wallet");
+
+    let bitcoin_balance = bitcoin_wallet.balance().await?;
+    info!(
+        "Connection to Bitcoin wallet succeeded, balance: {}",
+        bitcoin_balance
+    );
+
+    let jude_wallet = jude::Wallet::new(
+        config.jude.wallet_rpc_url.clone(),
+        jude_NETWORK,
+        DEFAULT_WALLET_NAME.to_string(),
+    );
+
+    // Setup the jude wallet
+    let open_wallet_response = jude_wallet.open_wallet(DEFAULT_WALLET_NAME).await;
+    if open_wallet_response.is_err() {
+        jude_wallet
+            .create_wallet(DEFAULT_WALLET_NAME)
+            .await
+            .context(format!(
+                "Unable to create jude wallet.\
+             Please ensure that the jude-wallet-rpc is available at {}",
+                config.jude.wallet_rpc_url
+            ))?;
+
+        info!("Created jude wallet {}", DEFAULT_WALLET_NAME);
+    } else {
+        info!("Opened jude wallet {}", DEFAULT_WALLET_NAME);
+    }
+
+    let balance = jude_wallet.get_balance().await?;
+    if balance == Amount::ZERO {
+        let deposit_address = jude_wallet.get_main_address().await?;
+        warn!(
+            "The jude balance is 0, make sure to deposit funds at: {}",
+            deposit_address
+        )
+    } else {
+        info!("jude balance: {}", balance);
+    }
+
+    Ok((bitcoin_wallet, jude_wallet))
+}
