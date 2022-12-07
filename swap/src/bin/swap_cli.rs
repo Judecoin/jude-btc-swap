@@ -19,7 +19,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use structopt::StructOpt;
 use swap::{
     bitcoin,
-    bitcoin::Amount,
+    bitcoin::{Amount, TxLock},
     cli::{
         command::{Arguments, Command},
         config::{read_config, Config},
@@ -34,10 +34,9 @@ use swap::{
         bob::{cancel::CancelError, Builder},
     },
     seed::Seed,
-    trace::init_tracing,
 };
-use tracing::{debug, error, info, warn};
-use tracing_subscriber::filter::LevelFilter;
+use tracing::{debug, error, warn, Level};
+use tracing_subscriber::FmtSubscriber;
 use uuid::Uuid;
 
 #[macro_use]
@@ -47,7 +46,15 @@ const jude_BLOCKCHAIN_MONITORING_WALLET_NAME: &str = "swap-tool-blockchain-monit
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing(LevelFilter::DEBUG).expect("initialize tracing");
+    let is_terminal = atty::is(atty::Stream::Stderr);
+    let subscriber = FmtSubscriber::builder()
+        .with_env_filter(format!("swap={}", Level::DEBUG))
+        .with_writer(std::io::stderr)
+        .with_ansi(is_terminal)
+        .with_target(false)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber)?;
 
     let opt = Arguments::from_args();
 
@@ -56,8 +63,8 @@ async fn main() -> Result<()> {
         None => Config::testnet(),
     };
 
-    info!(
-        "Database and Seed will be stored in directory: {}",
+    debug!(
+        "Database and seed will be stored in {}",
         config.data.dir.display()
     );
 
@@ -112,7 +119,7 @@ async fn main() -> Result<()> {
                 debug!("Received {}", bitcoin_wallet.balance().await?);
             }
 
-            let send_bitcoin = bitcoin_wallet.max_giveable().await?;
+            let send_bitcoin = bitcoin_wallet.max_giveable(TxLock::script_size()).await?;
 
             info!("Swapping {} ...", send_bitcoin);
 
@@ -233,7 +240,7 @@ async fn main() -> Result<()> {
                 cancel_result = cancel => {
                     match cancel_result? {
                         Ok((txid, _)) => {
-                            info!("Cancel transaction successfully published with id {}", txid)
+                            debug!("Cancel transaction successfully published with id {}", txid)
                         }
                         Err(CancelError::CancelTimelockNotExpiredYet) => error!(
                             "The Cancel Transaction cannot be published yet, \
@@ -346,7 +353,7 @@ async fn init_wallets(
                 jude_wallet_rpc_url
             ))?;
 
-        info!(
+        debug!(
             "Created jude wallet for blockchain monitoring with name {}",
             jude_BLOCKCHAIN_MONITORING_WALLET_NAME
         );
