@@ -59,10 +59,7 @@ impl From<RequestResponseEvent<QuoteRequest, QuoteResponse>> for OutEvent {
             RequestResponseEvent::OutboundFailure { error, .. } => {
                 OutEvent::Failure(anyhow!("Outbound failure: {:?}", error))
             }
-            RequestResponseEvent::ResponseSent { peer, .. } => {
-                tracing::debug!("successfully sent quote response to {}", peer);
-                OutEvent::ResponseSent
-            }
+            RequestResponseEvent::ResponseSent { .. } => OutEvent::ResponseSent,
         }
     }
 }
@@ -85,9 +82,7 @@ impl Behaviour {
     ) -> Result<()> {
         self.rr
             .send_response(channel, msg)
-            .map_err(|_| anyhow!("failed to send quote response"))?;
-
-        Ok(())
+            .map_err(|_| anyhow!("Sending quote response failed"))
     }
 }
 

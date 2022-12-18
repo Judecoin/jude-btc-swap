@@ -179,15 +179,10 @@ impl SignTxLock for Wallet {
 #[async_trait]
 impl BroadcastSignedTransaction for Wallet {
     async fn broadcast_signed_transaction(&self, transaction: Transaction) -> Result<Txid> {
-        let txid = transaction.txid();
-
-        self.inner
-            .lock()
-            .await
-            .broadcast(transaction)
-            .with_context(|| format!("failed to broadcast transaction {}", txid))?;
-
-        Ok(txid)
+        tracing::debug!("attempting to broadcast tx: {}", transaction.txid());
+        self.inner.lock().await.broadcast(transaction.clone())?;
+        tracing::info!("Bitcoin tx broadcasted! TXID = {}", transaction.txid());
+        Ok(transaction.txid())
     }
 }
 

@@ -10,7 +10,7 @@ use crate::{
 };
 use anyhow::{Error, Result};
 use libp2p::{request_response::ResponseChannel, NetworkBehaviour, PeerId};
-use tracing::debug;
+use tracing::{debug, info};
 
 #[derive(Debug)]
 pub enum OutEvent {
@@ -121,6 +121,7 @@ impl Behaviour {
         quote_response: QuoteResponse,
     ) -> Result<()> {
         self.quote_response.send(channel, quote_response)?;
+        info!("Sent quote response");
         Ok(())
     }
 

@@ -72,8 +72,6 @@ impl Behaviour {
     ) {
         self.inner
             .do_protocol_dialer(alice, move |mut substream| async move {
-                tracing::debug!("Starting execution setup with {}", alice);
-
                 substream
                     .write_message(
                         &serde_cbor::to_vec(&state0.next_message())

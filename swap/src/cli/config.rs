@@ -6,7 +6,7 @@ use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
 };
-use tracing::debug;
+use tracing::info;
 use url::Url;
 
 pub const DEFAULT_ELECTRUM_HTTP_URL: &str = "https://blockstream.info/testnet/api/";
@@ -66,7 +66,7 @@ pub struct ConfigNotInitialized {}
 
 pub fn read_config(config_path: PathBuf) -> Result<Result<Config, ConfigNotInitialized>> {
     if config_path.exists() {
-        debug!(
+        info!(
             "Using config file at default path: {}",
             config_path.display()
         );

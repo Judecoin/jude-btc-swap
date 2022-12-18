@@ -34,9 +34,10 @@ use swap::{
         bob::{cancel::CancelError, Builder},
     },
     seed::Seed,
+    trace::init_tracing,
 };
-use tracing::{debug, error, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::filter::LevelFilter;
 use uuid::Uuid;
 
 #[macro_use]
@@ -46,15 +47,7 @@ const jude_BLOCKCHAIN_MONITORING_WALLET_NAME: &str = "swap-tool-blockchain-monit
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let is_terminal = atty::is(atty::Stream::Stderr);
-    let subscriber = FmtSubscriber::builder()
-        .with_env_filter(format!("swap={}", Level::DEBUG))
-        .with_writer(std::io::stderr)
-        .with_ansi(is_terminal)
-        .with_target(false)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber)?;
+    init_tracing(LevelFilter::DEBUG).expect("initialize tracing");
 
     let opt = Arguments::from_args();
 
@@ -63,8 +56,8 @@ async fn main() -> Result<()> {
         None => Config::testnet(),
     };
 
-    debug!(
-        "Database and seed will be stored in {}",
+    info!(
+        "Database and Seed will be stored in directory: {}",
         config.data.dir.display()
     );
 
@@ -240,7 +233,7 @@ async fn main() -> Result<()> {
                 cancel_result = cancel => {
                     match cancel_result? {
                         Ok((txid, _)) => {
-                            debug!("Cancel transaction successfully published with id {}", txid)
+                            info!("Cancel transaction successfully published with id {}", txid)
                         }
                         Err(CancelError::CancelTimelockNotExpiredYet) => error!(
                             "The Cancel Transaction cannot be published yet, \
@@ -353,7 +346,7 @@ async fn init_wallets(
                 jude_wallet_rpc_url
             ))?;
 
-        debug!(
+        info!(
             "Created jude wallet for blockchain monitoring with name {}",
             jude_BLOCKCHAIN_MONITORING_WALLET_NAME
         );

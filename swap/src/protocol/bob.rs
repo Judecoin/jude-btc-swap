@@ -15,7 +15,7 @@ use crate::{
 use anyhow::{bail, Error, Result};
 use libp2p::{core::Multiaddr, identity::Keypair, NetworkBehaviour, PeerId};
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 pub use self::{
@@ -259,7 +259,8 @@ pub struct Behaviour {
 impl Behaviour {
     /// Sends a quote request to Alice to retrieve the rate.
     pub fn send_quote_request(&mut self, alice: PeerId, quote_request: QuoteRequest) {
-        let _ = self.quote_request.send(alice, quote_request);
+        let _id = self.quote_request.send(alice, quote_request);
+        info!("Requesting quote from: {}", alice);
     }
 
     pub fn start_execution_setup(
@@ -270,8 +271,10 @@ impl Behaviour {
     ) {
         self.execution_setup
             .run(alice_peer_id, state0, bitcoin_wallet);
+        info!("Start execution setup with {}", alice_peer_id);
     }
 
+    /// Sends Bob's fourth message to Alice.
     pub fn send_encrypted_signature(
         &mut self,
         alice: PeerId,
