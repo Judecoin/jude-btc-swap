@@ -16,7 +16,7 @@ use crate::{
     },
     seed::Seed,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use futures::future::RemoteHandle;
 use libp2p::{
     core::Multiaddr, futures::FutureExt, request_response::ResponseChannel, PeerId, Swarm,
@@ -221,19 +221,19 @@ where
         let jude_amount = rate.sell_quote(btc_amount)?;
 
         if jude_amount > self.max_sell {
-            bail!(MaximumSellAmountExceeded {
+            anyhow!(MaximumSellAmountExceeded {
                 actual: jude_amount,
                 max_sell: self.max_sell
-            })
+            });
         }
 
         let jude_balance = jude_wallet.get_balance().await?;
         let jude_lock_fees = jude_wallet.static_tx_fee_estimate();
 
         if jude_balance < jude_amount + jude_lock_fees {
-            bail!(BalanceTooLow {
+            anyhow!(BalanceTooLow {
                 balance: jude_balance
-            })
+            });
         }
 
         let quote_response = QuoteResponse { jude_amount };
