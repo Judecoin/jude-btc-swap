@@ -1,34 +1,31 @@
-use crate::testutils::init_tracing;
-use jude_harness::{jude, judeWalletRpc};
+use jude_harness::{Jude, JudeWalletRpc};
+use jude_rpc::wallet::JudeWalletRpc as _;
 use spectral::prelude::*;
-use std::{thread::sleep, time::Duration};
+use std::time::Duration;
 use testcontainers::clients::Cli;
-
-mod testutils;
+use tokio::time::sleep;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::test]
 async fn fund_transfer_and_check_tx_key() {
-    let _guard = init_tracing();
+    let _guard = tracing_subscriber::fmt()
+        .with_env_filter("warn,test=debug,jude_harness=debug,jude_rpc=debug")
+        .set_default();
 
     let fund_alice: u64 = 1_000_000_000_000;
     let fund_bob = 0;
     let send_to_bob = 5_000_000_000;
 
     let tc = Cli::default();
-    let (jude, _containers) = jude::new(&tc, Some("test_".to_string()), vec![
-        "alice".to_string(),
-        "bob".to_string(),
-    ])
-    .await
-    .unwrap();
+    let (jude, _juded_container, _wallet_containers) =
+        Jude::new(&tc, vec!["alice", "bob"]).await.unwrap();
     let alice_wallet = jude.wallet("alice").unwrap();
     let bob_wallet = jude.wallet("bob").unwrap();
 
-    // fund alice
-    jude
-        .init(vec![("alice", fund_alice), ("bob", fund_bob)])
-        .await
-        .unwrap();
+    jude.init_miner().await.unwrap();
+    jude.init_wallet("alice", vec![fund_alice]).await.unwrap();
+    jude.init_wallet("bob", vec![fund_bob]).await.unwrap();
+    jude.start_miner().await.unwrap();
 
     // check alice balance
     let got_alice_balance = alice_wallet.balance().await.unwrap();
@@ -48,17 +45,17 @@ async fn fund_transfer_and_check_tx_key() {
 
     // check if tx was actually seen
     let tx_id = transfer.tx_hash;
-    let tx_key = transfer.tx_key;
+    let tx_key = transfer.tx_key.unwrap().to_string();
     let res = bob_wallet
         .client()
-        .check_tx_key(&tx_id, &tx_key, &bob_address)
+        .check_tx_key(tx_id, tx_key, bob_address)
         .await
         .expect("failed to check tx by key");
 
     assert_that!(res.received).is_equal_to(send_to_bob);
 }
 
-async fn wait_for_wallet_to_catch_up(wallet: &judeWalletRpc, expected_balance: u64) {
+async fn wait_for_wallet_to_catch_up(wallet: &JudeWalletRpc, expected_balance: u64) {
     let max_retry = 15;
     let mut retry = 0;
     loop {
@@ -67,6 +64,6 @@ async fn wait_for_wallet_to_catch_up(wallet: &judeWalletRpc, expected_balance: u
         if balance == expected_balance || max_retry == retry {
             break;
         }
-        sleep(Duration::from_secs(1));
+        sleep(Duration::from_secs(1)).await;
     }
 }

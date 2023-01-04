@@ -1,0 +1,19 @@
+[package]
+name = "jude-wallet"
+version = "0.1.0"
+authors = [ "CoBloX Team <team@coblox.tech>" ]
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+jude = "0.12"
+jude-rpc = { path = "../jude-rpc" }
+rand = "0.7"
+
+[dev-dependencies]
+curve25519-dalek = "3"
+jude-harness = { path = "../jude-harness" }
+rand = "0.7"
+testcontainers = "0.12"
+tokio = { version = "1", features = [ "rt-multi-thread", "time", "macros", "sync", "process", "fs" ] }
+tracing-subscriber = { version = "0.2", default-features = false, features = [ "fmt", "ansi", "env-filter", "chrono", "tracing-log" ] }

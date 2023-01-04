@@ -12,6 +12,7 @@
 )]
 #![forbid(unsafe_code)]
 
-mod rpc;
+pub mod juded;
+pub mod wallet;
 
-pub use self::rpc::*;
+pub use jsonrpc_client as jsonrpc;
