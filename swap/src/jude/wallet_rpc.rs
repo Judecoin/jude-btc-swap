@@ -2,44 +2,39 @@ use ::jude::Network;
 use anyhow::{Context, Result};
 use big_bytes::BigByte;
 use futures::{StreamExt, TryStreamExt};
-use jude_rpc::wallet::{Client, JudeWalletRpc as _};
-use reqwest::header::CONTENT_LENGTH;
-use reqwest::Url;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use tokio::fs::{remove_file, OpenOptions};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio_util::codec::{BytesCodec, FramedRead};
-use tokio_util::io::StreamReader;
+use reqwest::{header::CONTENT_LENGTH, Url};
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    process::Stdio,
+};
+use tokio::{
+    fs::{remove_file, OpenOptions},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{Child, Command},
+};
+use tokio_util::{
+    codec::{BytesCodec, FramedRead},
+    io::StreamReader,
+};
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 compile_error!("unsupported operating system");
 
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const DOWNLOAD_URL: &str = "https://downloads.getjude.org/cli/jude-mac-x64-v0.18.0.0.tar.bz2";
+#[cfg(target_os = "macos")]
+const DOWNLOAD_URL: &str = "http://downloads.getjude.org/cli/jude-mac-x64-v0.17.1.9.tar.bz2";
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const DOWNLOAD_URL: &str = "https://downloads.getjude.org/cli/jude-mac-armv8-v0.18.0.0.tar.bz2";
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const DOWNLOAD_URL: &str = "https://downloads.getjude.org/cli/jude-linux-x64-v0.18.0.0.tar.bz2";
-
-#[cfg(all(target_os = "linux", target_arch = "arm"))]
-const DOWNLOAD_URL: &str =
-    "https://downloads.getjude.org/cli/jude-linux-armv7-v0.18.0.0.tar.bz2";
+#[cfg(target_os = "linux")]
+const DOWNLOAD_URL: &str = "https://downloads.getjude.org/cli/jude-linux-x64-v0.17.1.9.tar.bz2";
 
 #[cfg(target_os = "windows")]
-const DOWNLOAD_URL: &str = "https://downloads.getjude.org/cli/jude-win-x64-v0.18.0.0.zip";
+const DOWNLOAD_URL: &str = "https://downloads.getjude.org/cli/jude-win-x64-v0.17.1.9.zip";
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const PACKED_FILE: &str = "jude-wallet-rpc";
 
 #[cfg(target_os = "windows")]
 const PACKED_FILE: &str = "jude-wallet-rpc.exe";
-
-const CODENAME: &str = "Fluorine Fermi";
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 #[error("jude wallet rpc executable not found in downloaded archive")]
@@ -77,22 +72,6 @@ impl WalletRpc {
             remove_file(jude_wallet_rpc.archive_path()).await?;
         }
 
-        // check the jude-wallet-rpc version
-        let exec_path = jude_wallet_rpc.exec_path();
-        tracing::debug!("RPC exec path: {}", exec_path.display());
-
-        if exec_path.exists() {
-            let output = Command::new(&exec_path).arg("--version").output().await?;
-            let version = String::from_utf8_lossy(&output.stdout);
-            tracing::debug!("RPC version output: {}", version);
-
-            if !version.contains(CODENAME) {
-                tracing::info!("Removing old version of jude-wallet-rpc");
-                tokio::fs::remove_file(exec_path).await?;
-            }
-        }
-
-        // if jude-wallet-rpc doesn't exist then download it
         if !jude_wallet_rpc.exec_path().exists() {
             let mut options = OpenOptions::new();
             let mut file = options
@@ -106,13 +85,12 @@ impl WalletRpc {
 
             let content_length = response.headers()[CONTENT_LENGTH]
                 .to_str()
-                .context("Failed to convert content-length to string")?
+                .context("failed to convert content-length to string")?
                 .parse::<u64>()?;
 
             tracing::info!(
-                "Downloading jude-wallet-rpc ({}) from {}",
-                content_length.big_byte(2),
-                DOWNLOAD_URL
+                "Downloading jude-wallet-rpc ({})",
+                content_length.big_byte(2)
             );
 
             let byte_stream = response
@@ -130,59 +108,35 @@ impl WalletRpc {
             let mut stream = FramedRead::new(StreamReader::new(byte_stream), BytesCodec::new())
                 .map_ok(|bytes| bytes.freeze());
 
-            let (mut received, mut notified) = (0, 0);
             while let Some(chunk) = stream.next().await {
-                let bytes = chunk?;
-                received += bytes.len();
-                // the stream is decompressed as it is downloaded
-                // file is compressed approx 3:1 in bz format
-                let total = 3 * content_length;
-                let percent = 100 * received as u64 / total;
-                if percent != notified && percent % 10 == 0 {
-                    tracing::debug!("{}%", percent);
-                    notified = percent;
-                }
-                file.write_all(&bytes).await?;
+                file.write(&chunk?).await?;
             }
 
             file.flush().await?;
 
-            tracing::debug!("Extracting archive");
             Self::extract_archive(&jude_wallet_rpc).await?;
         }
         Ok(jude_wallet_rpc)
     }
 
-    pub async fn run(&self, network: Network, daemon_address: &str) -> Result<WalletRpcProcess> {
+    pub async fn run(&self, network: Network, daemon_host: &str) -> Result<WalletRpcProcess> {
         let port = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await?
             .local_addr()?
             .port();
 
-        tracing::debug!(
-            %port,
-            "Starting jude-wallet-rpc"
-        );
-
-        let network_flag = match network {
-            Network::Mainnet => {
-                vec![]
-            }
-            Network::Stagenet => {
-                vec!["--stagenet"]
-            }
-            Network::Testnet => {
-                vec!["--testnet"]
-            }
-        };
+        tracing::debug!("Starting jude-wallet-rpc on port {}", port);
 
         let mut child = Command::new(self.exec_path())
-            .env("LANG", "en_AU.UTF-8")
             .stdout(Stdio::piped())
             .kill_on_drop(true)
-            .args(network_flag)
-            .arg("--daemon-address")
-            .arg(daemon_address)
+            .arg(match network {
+                Network::Mainnet => "--mainnet",
+                Network::Stagenet => "--stagenet",
+                Network::Testnet => "--testnet",
+            })
+            .arg("--daemon-host")
+            .arg(daemon_host)
             .arg("--rpc-bind-port")
             .arg(format!("{}", port))
             .arg("--disable-rpc-login")
@@ -197,24 +151,11 @@ impl WalletRpc {
 
         let mut reader = BufReader::new(stdout).lines();
 
-        #[cfg(not(target_os = "windows"))]
         while let Some(line) = reader.next_line().await? {
             if line.contains("Starting wallet RPC server") {
                 break;
             }
         }
-
-        // If we do not hear from the jude_wallet_rpc process for 3 seconds we assume
-        // it is is ready
-        #[cfg(target_os = "windows")]
-        while let Ok(line) =
-            tokio::time::timeout(std::time::Duration::from_secs(3), reader.next_line()).await
-        {
-            line?;
-        }
-
-        // Send a json rpc request to make sure jude_wallet_rpc is ready
-        Client::localhost(port)?.get_version().await?;
 
         Ok(WalletRpcProcess {
             _child: child,

@@ -1,78 +1,141 @@
-use crate::env::Config;
 use crate::jude::{
-    Amount, InsufficientFunds, PrivateViewKey, PublicViewKey, TransferProof, TxHash,
+    Amount, CreateWallet, CreateWalletForOutput, CreateWalletForOutputThenLoadDefaultWallet,
+    InsufficientFunds, OpenWallet, PrivateViewKey, PublicViewKey, Transfer, TransferProof, TxHash,
+    WatchForTransfer,
 };
 use ::jude::{Address, Network, PrivateKey, PublicKey};
-use anyhow::{Context, Result};
-use jude_rpc::wallet::{BlockHeight, JudeWalletRpc as _, Refreshed};
-use jude_rpc::{jsonrpc, wallet};
-use std::str::FromStr;
-use std::time::Duration;
+use anyhow::Result;
+use async_trait::async_trait;
+use backoff::{backoff::Constant as ConstantBackoff, future::retry};
+use bitcoin::hashes::core::sync::atomic::AtomicU32;
+use jude_rpc::{
+    wallet,
+    wallet::{BlockHeight, Refreshed},
+};
+use std::{str::FromStr, sync::atomic::Ordering, time::Duration};
 use tokio::sync::Mutex;
-use tokio::time::Interval;
+use tracing::info;
 use url::Url;
 
 #[derive(Debug)]
 pub struct Wallet {
     inner: Mutex<wallet::Client>,
     network: Network,
-    name: String,
-    main_address: jude::Address,
-    sync_interval: Duration,
+    default_wallet_name: String,
 }
 
 impl Wallet {
-    /// Connect to a wallet RPC and load the given wallet by name.
-    pub async fn open_or_create(url: Url, name: String, env_config: Config) -> Result<Self> {
-        let client = wallet::Client::new(url)?;
-
-        let open_wallet_response = client.open_wallet(name.clone()).await;
-        if open_wallet_response.is_err() {
-            client.create_wallet(name.clone(), "English".to_owned()).await.context(
-                "Unable to create Jude wallet, please ensure that the jude-wallet-rpc is available",
-            )?;
-
-            tracing::debug!(jude_wallet_name = %name, "Created Jude wallet");
-        } else {
-            tracing::debug!(jude_wallet_name = %name, "Opened Jude wallet");
+    pub fn new(url: Url, network: Network, default_wallet_name: String) -> Self {
+        Self {
+            inner: Mutex::new(wallet::Client::new(url)),
+            network,
+            default_wallet_name,
         }
-
-        Self::connect(client, name, env_config).await
     }
 
-    /// Connects to a wallet RPC where a wallet is already loaded.
-    pub async fn connect(client: wallet::Client, name: String, env_config: Config) -> Result<Self> {
-        let main_address =
-            jude::Address::from_str(client.get_address(0).await?.address.as_str())?;
-        Ok(Self {
+    pub fn new_with_client(
+        client: wallet::Client,
+        network: Network,
+        default_wallet_name: String,
+    ) -> Self {
+        Self {
             inner: Mutex::new(client),
-            network: env_config.jude_network,
-            name,
-            main_address,
-            sync_interval: env_config.jude_sync_interval(),
-        })
+            network,
+            default_wallet_name,
+        }
     }
 
-    /// Re-open the wallet using the internally stored name.
-    pub async fn re_open(&self) -> Result<()> {
-        self.inner
+    /// Get the balance of the primary account.
+    pub async fn get_balance(&self) -> Result<Amount> {
+        let amount = self.inner.lock().await.get_balance(0).await?;
+
+        Ok(Amount::from_piconero(amount))
+    }
+
+    pub async fn block_height(&self) -> Result<BlockHeight> {
+        self.inner.lock().await.block_height().await
+    }
+
+    pub async fn get_main_address(&self) -> Result<Address> {
+        let address = self.inner.lock().await.get_address(0).await?;
+        Ok(Address::from_str(address.address.as_str())?)
+    }
+
+    pub async fn refresh(&self) -> Result<Refreshed> {
+        self.inner.lock().await.refresh().await
+    }
+
+    pub fn static_tx_fee_estimate(&self) -> Amount {
+        // Median tx fees on jude as found here: https://www.jude.how/jude-transaction-fees, 0.000_015 * 2 (to be on the safe side)
+        Amount::from_jude(0.000_03f64).expect("static fee to be convertible without problems")
+    }
+}
+
+#[async_trait]
+impl Transfer for Wallet {
+    async fn transfer(
+        &self,
+        public_spend_key: PublicKey,
+        public_view_key: PublicViewKey,
+        amount: Amount,
+    ) -> Result<TransferProof> {
+        let destination_address =
+            Address::standard(self.network, public_spend_key, public_view_key.into());
+
+        let res = self
+            .inner
             .lock()
             .await
-            .open_wallet(self.name.clone())
+            .transfer(0, amount.as_piconero(), &destination_address.to_string())
             .await?;
-        Ok(())
-    }
 
-    pub async fn open(&self, filename: String) -> Result<()> {
-        self.inner.lock().await.open_wallet(filename).await?;
-        Ok(())
-    }
+        tracing::debug!(
+            "sent transfer of {} to {} in {}",
+            amount,
+            public_spend_key,
+            res.tx_hash
+        );
 
-    /// Close the wallet and open (load) another wallet by generating it from
-    /// keys. The generated wallet will remain loaded.
-    pub async fn create_from_and_load(
+        Ok(TransferProof::new(
+            TxHash(res.tx_hash),
+            PrivateKey::from_str(&res.tx_key)?,
+        ))
+    }
+}
+
+#[async_trait]
+impl CreateWalletForOutput for Wallet {
+    async fn create_and_load_wallet_for_output(
         &self,
-        file_name: String,
+        private_spend_key: PrivateKey,
+        private_view_key: PrivateViewKey,
+        restore_height: BlockHeight,
+    ) -> Result<()> {
+        let public_spend_key = PublicKey::from_private_key(&private_spend_key);
+        let public_view_key = PublicKey::from_private_key(&private_view_key.into());
+
+        let address = Address::standard(self.network, public_spend_key, public_view_key);
+
+        let _ = self
+            .inner
+            .lock()
+            .await
+            .generate_from_keys(
+                &address.to_string(),
+                &private_spend_key.to_string(),
+                &PrivateKey::from(private_view_key).to_string(),
+                restore_height.height,
+            )
+            .await?;
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl CreateWalletForOutputThenLoadDefaultWallet for Wallet {
+    async fn create_and_load_wallet_for_output_then_load_default_wallet(
+        &self,
         private_spend_key: PrivateKey,
         private_view_key: PrivateViewKey,
         restore_height: BlockHeight,
@@ -84,494 +147,104 @@ impl Wallet {
 
         let wallet = self.inner.lock().await;
 
-        // Properly close the wallet before generating the other wallet to ensure that
-        // it saves its state correctly
-        let _ = wallet
-            .close_wallet()
-            .await
-            .context("Failed to close wallet")?;
-
         let _ = wallet
             .generate_from_keys(
-                file_name,
-                address.to_string(),
-                private_spend_key.to_string(),
-                PrivateKey::from(private_view_key).to_string(),
+                &address.to_string(),
+                &private_spend_key.to_string(),
+                &PrivateKey::from(private_view_key).to_string(),
                 restore_height.height,
-                String::from(""),
-                true,
             )
-            .await
-            .context("Failed to generate new wallet from keys")?;
+            .await?;
+
+        let _ = wallet
+            .open_wallet(self.default_wallet_name.as_str())
+            .await?;
 
         Ok(())
     }
+}
 
-    /// Close the wallet and open (load) another wallet by generating it from
-    /// keys. The generated wallet will be opened, all funds sweeped to the
-    /// main_address and then the wallet will be re-loaded using the internally
-    /// stored name.
-    pub async fn create_from(
+#[async_trait]
+impl OpenWallet for Wallet {
+    async fn open_wallet(&self, file_name: &str) -> Result<()> {
+        self.inner.lock().await.open_wallet(file_name).await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl CreateWallet for Wallet {
+    async fn create_wallet(&self, file_name: &str) -> Result<()> {
+        self.inner.lock().await.create_wallet(file_name).await?;
+        Ok(())
+    }
+}
+
+// TODO: For retry, use `backoff::ExponentialBackoff` in production as opposed
+// to `ConstantBackoff`.
+#[async_trait]
+impl WatchForTransfer for Wallet {
+    async fn watch_for_transfer(
         &self,
-        file_name: String,
-        private_spend_key: PrivateKey,
-        private_view_key: PrivateViewKey,
-        restore_height: BlockHeight,
-    ) -> Result<()> {
-        let public_spend_key = PublicKey::from_private_key(&private_spend_key);
-        let public_view_key = PublicKey::from_private_key(&private_view_key.into());
-
-        let temp_wallet_address =
-            Address::standard(self.network, public_spend_key, public_view_key);
-
-        let wallet = self.inner.lock().await;
-
-        // Close the default wallet before generating the other wallet to ensure that
-        // it saves its state correctly
-        let _ = wallet.close_wallet().await?;
-
-        let _ = wallet
-            .generate_from_keys(
-                file_name,
-                temp_wallet_address.to_string(),
-                private_spend_key.to_string(),
-                PrivateKey::from(private_view_key).to_string(),
-                restore_height.height,
-                String::from(""),
-                true,
-            )
-            .await?;
-
-        // Try to send all the funds from the generated wallet to the default wallet
-        match wallet.refresh().await {
-            Ok(_) => match wallet.sweep_all(self.main_address.to_string()).await {
-                Ok(sweep_all) => {
-                    for tx in sweep_all.tx_hash_list {
-                        tracing::info!(
-                            %tx,
-                            jude_address = %self.main_address,
-                            "Jude transferred back to default wallet");
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        address = %self.main_address,
-                        "Failed to transfer Jude to default wallet: {:#}", error
-                    );
-                }
-            },
-            Err(error) => {
-                tracing::warn!("Failed to refresh generated wallet: {:#}", error);
-            }
+        public_spend_key: PublicKey,
+        public_view_key: PublicViewKey,
+        transfer_proof: TransferProof,
+        expected_amount: Amount,
+        expected_confirmations: u32,
+    ) -> Result<(), InsufficientFunds> {
+        enum Error {
+            TxNotFound,
+            InsufficientConfirmations,
+            InsufficientFunds { expected: Amount, actual: Amount },
         }
-
-        let _ = wallet.open_wallet(self.name.clone()).await?;
-
-        Ok(())
-    }
-
-    pub async fn transfer(&self, request: TransferRequest) -> Result<TransferProof> {
-        let inner = self.inner.lock().await;
-
-        inner
-            .open_wallet(self.name.clone())
-            .await
-            .with_context(|| format!("Failed to open wallet {}", self.name))?;
-
-        let TransferRequest {
-            public_spend_key,
-            public_view_key,
-            amount,
-        } = request;
-
-        let destination_address =
-            Address::standard(self.network, public_spend_key, public_view_key.into());
-
-        let res = inner
-            .transfer_single(0, amount.as_piconero(), &destination_address.to_string())
-            .await?;
-
-        tracing::debug!(
-            %amount,
-            to = %public_spend_key,
-            tx_id = %res.tx_hash,
-            "Successfully initiated Jude transfer"
-        );
-
-        Ok(TransferProof::new(
-            TxHash(res.tx_hash),
-            res.tx_key
-                .context("Missing tx_key in `transfer` response")?,
-        ))
-    }
-
-    pub async fn watch_for_transfer(&self, request: WatchRequest) -> Result<(), InsufficientFunds> {
-        let WatchRequest {
-            conf_target,
-            public_view_key,
-            public_spend_key,
-            transfer_proof,
-            expected,
-        } = request;
-
-        let txid = transfer_proof.tx_hash();
-
-        tracing::info!(
-            %txid,
-            target_confirmations = %conf_target,
-            "Waiting for Jude transaction finality"
-        );
 
         let address = Address::standard(self.network, public_spend_key, public_view_key.into());
 
-        let check_interval = tokio::time::interval(self.sync_interval);
+        let confirmations = AtomicU32::new(0u32);
 
-        wait_for_confirmations(
-            &self.inner,
-            transfer_proof,
-            address,
-            expected,
-            conf_target,
-            check_interval,
-            self.name.clone(),
-        )
-        .await?;
+        let res = retry(ConstantBackoff::new(Duration::from_secs(1)), || async {
+            // NOTE: Currently, this is conflicting IO errors with the transaction not being
+            // in the blockchain yet, or not having enough confirmations on it. All these
+            // errors warrant a retry, but the strategy should probably differ per case
+            let proof = self
+                .inner
+                .lock()
+                .await
+                .check_tx_key(
+                    &String::from(transfer_proof.tx_hash()),
+                    &transfer_proof.tx_key().to_string(),
+                    &address.to_string(),
+                )
+                .await
+                .map_err(|_| backoff::Error::Transient(Error::TxNotFound))?;
 
-        Ok(())
-    }
-
-    pub async fn sweep_all(&self, address: Address) -> Result<Vec<TxHash>> {
-        let sweep_all = self
-            .inner
-            .lock()
-            .await
-            .sweep_all(address.to_string())
-            .await?;
-
-        let tx_hashes = sweep_all.tx_hash_list.into_iter().map(TxHash).collect();
-        Ok(tx_hashes)
-    }
-
-    /// Get the balance of the primary account.
-    pub async fn get_balance(&self) -> Result<Amount> {
-        let amount = self.inner.lock().await.get_balance(0).await?.balance;
-
-        Ok(Amount::from_piconero(amount))
-    }
-
-    pub async fn block_height(&self) -> Result<BlockHeight> {
-        Ok(self.inner.lock().await.get_height().await?)
-    }
-
-    pub fn get_main_address(&self) -> Address {
-        self.main_address
-    }
-
-    pub async fn refresh(&self) -> Result<Refreshed> {
-        Ok(self.inner.lock().await.refresh().await?)
-    }
-}
-
-#[derive(Debug)]
-pub struct TransferRequest {
-    pub public_spend_key: PublicKey,
-    pub public_view_key: PublicViewKey,
-    pub amount: Amount,
-}
-
-#[derive(Debug)]
-pub struct WatchRequest {
-    pub public_spend_key: PublicKey,
-    pub public_view_key: PublicViewKey,
-    pub transfer_proof: TransferProof,
-    pub conf_target: u64,
-    pub expected: Amount,
-}
-
-async fn wait_for_confirmations<C: jude_rpc::wallet::JudeWalletRpc<reqwest::Client> + Sync>(
-    client: &Mutex<C>,
-    transfer_proof: TransferProof,
-    to_address: Address,
-    expected: Amount,
-    conf_target: u64,
-    mut check_interval: Interval,
-    wallet_name: String,
-) -> Result<(), InsufficientFunds> {
-    let mut seen_confirmations = 0u64;
-
-    while seen_confirmations < conf_target {
-        check_interval.tick().await; // tick() at the beginning of the loop so every `continue` tick()s as well
-
-        let txid = transfer_proof.tx_hash().to_string();
-        let client = client.lock().await;
-
-        let tx = match client
-            .check_tx_key(
-                txid.clone(),
-                transfer_proof.tx_key.to_string(),
-                to_address.to_string(),
-            )
-            .await
-        {
-            Ok(proof) => proof,
-            Err(jsonrpc::Error::JsonRpc(jsonrpc::JsonRpcError {
-                code: -1,
-                message,
-                data,
-            })) => {
-                tracing::debug!(message, ?data);
-                tracing::warn!(%txid, message, "`jude-wallet-rpc` failed to fetch transaction, may need to be restarted");
-                continue;
+            if proof.received != expected_amount.as_piconero() {
+                return Err(backoff::Error::Permanent(Error::InsufficientFunds {
+                    expected: expected_amount,
+                    actual: Amount::from_piconero(proof.received),
+                }));
             }
-            // TODO: Implement this using a generic proxy for each function call once https://github.com/thomaseizinger/rust-jsonrpc-client/issues/47 is fixed.
-            Err(jsonrpc::Error::JsonRpc(jsonrpc::JsonRpcError { code: -13, .. })) => {
-                tracing::debug!(
-                    "Opening wallet `{}` because no wallet is loaded",
-                    wallet_name
+
+            if proof.confirmations > confirmations.load(Ordering::SeqCst) {
+                confirmations.store(proof.confirmations, Ordering::SeqCst);
+                info!(
+                    "jude lock tx received {} out of {} confirmations",
+                    proof.confirmations, expected_confirmations
                 );
-                let _ = client.open_wallet(wallet_name.clone()).await;
-                continue;
             }
-            Err(other) => {
-                tracing::debug!(
-                    %txid,
-                    "Failed to retrieve tx from blockchain: {:#}", other
-                );
-                continue; // treating every error as transient and retrying
-                          // is obviously wrong but the jsonrpc client is
-                          // too primitive to differentiate between all the
-                          // cases
+
+            if proof.confirmations < expected_confirmations {
+                return Err(backoff::Error::Transient(Error::InsufficientConfirmations));
             }
-        };
 
-        let received = Amount::from_piconero(tx.received);
-
-        if received != expected {
-            return Err(InsufficientFunds {
-                expected,
-                actual: received,
-            });
-        }
-
-        if tx.confirmations > seen_confirmations {
-            seen_confirmations = tx.confirmations;
-            tracing::info!(
-                %txid,
-                %seen_confirmations,
-                needed_confirmations = %conf_target,
-                "Received new confirmation for Jude lock tx"
-            );
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tracing_ext::capture_logs;
-    use jude_rpc::wallet::CheckTxKey;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use tracing::metadata::LevelFilter;
-
-    #[tokio::test]
-    async fn given_exact_confirmations_does_not_fetch_tx_again() {
-        let client = Mutex::new(DummyClient::new(vec![Ok(CheckTxKey {
-            confirmations: 10,
-            received: 100,
-        })]));
-
-        let result = wait_for_confirmations(
-            &client,
-            TransferProof::new(TxHash("<FOO>".to_owned()), PrivateKey {
-                scalar: crate::jude::Scalar::random(&mut rand::thread_rng())
-            }),
-            "53H3QthYLckeCXh9u38vohb2gZ4QgEG3FMWHNxccR6MqV1LdDVYwF1FKsRJPj4tTupWLf9JtGPBcn2MVN6c9oR7p5Uf7JdJ".parse().unwrap(),
-            Amount::from_piconero(100),
-            10,
-            tokio::time::interval(Duration::from_millis(10)),
-            "foo-wallet".to_owned()
-        )
+            Ok(proof)
+        })
         .await;
 
-        assert!(result.is_ok());
-        assert_eq!(
-            client
-                .lock()
-                .await
-                .check_tx_key_invocations
-                .load(Ordering::SeqCst),
-            1
-        );
-    }
+        if let Err(Error::InsufficientFunds { expected, actual }) = res {
+            return Err(InsufficientFunds { expected, actual });
+        };
 
-    #[tokio::test]
-    async fn visual_log_check() {
-        let writer = capture_logs(LevelFilter::INFO);
-
-        let client = Mutex::new(DummyClient::new(vec![
-            Ok(CheckTxKey {
-                confirmations: 1,
-                received: 100,
-            }),
-            Ok(CheckTxKey {
-                confirmations: 1,
-                received: 100,
-            }),
-            Ok(CheckTxKey {
-                confirmations: 1,
-                received: 100,
-            }),
-            Ok(CheckTxKey {
-                confirmations: 3,
-                received: 100,
-            }),
-            Ok(CheckTxKey {
-                confirmations: 5,
-                received: 100,
-            }),
-        ]));
-
-        wait_for_confirmations(
-            &client,
-            TransferProof::new(TxHash("<FOO>".to_owned()), PrivateKey {
-                scalar: crate::jude::Scalar::random(&mut rand::thread_rng())
-            }),
-            "53H3QthYLckeCXh9u38vohb2gZ4QgEG3FMWHNxccR6MqV1LdDVYwF1FKsRJPj4tTupWLf9JtGPBcn2MVN6c9oR7p5Uf7JdJ".parse().unwrap(),
-            Amount::from_piconero(100),
-            5,
-            tokio::time::interval(Duration::from_millis(10)),
-            "foo-wallet".to_owned()
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            writer.captured(),
-            r" INFO swap::jude::wallet: Received new confirmation for Jude lock tx txid=<FOO> seen_confirmations=1 needed_confirmations=5
- INFO swap::jude::wallet: Received new confirmation for Jude lock tx txid=<FOO> seen_confirmations=3 needed_confirmations=5
- INFO swap::jude::wallet: Received new confirmation for Jude lock tx txid=<FOO> seen_confirmations=5 needed_confirmations=5
-"
-        );
-    }
-
-    #[tokio::test]
-    async fn reopens_wallet_in_case_not_available() {
-        let writer = capture_logs(LevelFilter::DEBUG);
-
-        let client = Mutex::new(DummyClient::new(vec![
-            Ok(CheckTxKey {
-                confirmations: 1,
-                received: 100,
-            }),
-            Ok(CheckTxKey {
-                confirmations: 1,
-                received: 100,
-            }),
-            Err((-13, "No wallet file".to_owned())),
-            Ok(CheckTxKey {
-                confirmations: 3,
-                received: 100,
-            }),
-            Ok(CheckTxKey {
-                confirmations: 5,
-                received: 100,
-            }),
-        ]));
-
-        wait_for_confirmations(
-            &client,
-            TransferProof::new(TxHash("<FOO>".to_owned()), PrivateKey {
-                scalar: crate::jude::Scalar::random(&mut rand::thread_rng())
-            }),
-            "53H3QthYLckeCXh9u38vohb2gZ4QgEG3FMWHNxccR6MqV1LdDVYwF1FKsRJPj4tTupWLf9JtGPBcn2MVN6c9oR7p5Uf7JdJ".parse().unwrap(),
-            Amount::from_piconero(100),
-            5,
-            tokio::time::interval(Duration::from_millis(10)),
-            "foo-wallet".to_owned()
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            writer.captured(),
-            r" INFO swap::jude::wallet: Received new confirmation for Jude lock tx txid=<FOO> seen_confirmations=1 needed_confirmations=5
-DEBUG swap::jude::wallet: Opening wallet `foo-wallet` because no wallet is loaded
- INFO swap::jude::wallet: Received new confirmation for Jude lock tx txid=<FOO> seen_confirmations=3 needed_confirmations=5
- INFO swap::jude::wallet: Received new confirmation for Jude lock tx txid=<FOO> seen_confirmations=5 needed_confirmations=5
-"
-        );
-        assert_eq!(
-            client
-                .lock()
-                .await
-                .open_wallet_invocations
-                .load(Ordering::SeqCst),
-            1
-        );
-    }
-
-    type ErrorCode = i64;
-    type ErrorMessage = String;
-
-    struct DummyClient {
-        check_tx_key_responses: Vec<Result<wallet::CheckTxKey, (ErrorCode, ErrorMessage)>>,
-
-        check_tx_key_invocations: AtomicU32,
-        open_wallet_invocations: AtomicU32,
-    }
-
-    impl DummyClient {
-        fn new(
-            check_tx_key_responses: Vec<Result<wallet::CheckTxKey, (ErrorCode, ErrorMessage)>>,
-        ) -> Self {
-            Self {
-                check_tx_key_responses,
-                check_tx_key_invocations: Default::default(),
-                open_wallet_invocations: Default::default(),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl jude_rpc::wallet::JudeWalletRpc<reqwest::Client> for DummyClient {
-        async fn open_wallet(
-            &self,
-            _: String,
-        ) -> Result<wallet::WalletOpened, jude_rpc::jsonrpc::Error<reqwest::Error>> {
-            self.open_wallet_invocations.fetch_add(1, Ordering::SeqCst);
-
-            Ok(jude_rpc::wallet::Empty {})
-        }
-
-        async fn check_tx_key(
-            &self,
-            _: String,
-            _: String,
-            _: String,
-        ) -> Result<wallet::CheckTxKey, jude_rpc::jsonrpc::Error<reqwest::Error>> {
-            let index = self.check_tx_key_invocations.fetch_add(1, Ordering::SeqCst);
-
-            self.check_tx_key_responses[index as usize]
-                .clone()
-                .map_err(|(code, message)| {
-                    jude_rpc::jsonrpc::Error::JsonRpc(jude_rpc::jsonrpc::JsonRpcError {
-                        code,
-                        message,
-                        data: None,
-                    })
-                })
-        }
-
-        async fn send_request<P>(
-            &self,
-            _: String,
-        ) -> Result<jude_rpc::jsonrpc::Response<P>, reqwest::Error>
-        where
-            P: serde::de::DeserializeOwned,
-        {
-            todo!()
-        }
+        Ok(())
     }
 }

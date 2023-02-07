@@ -22,14 +22,16 @@
 //! Also provides standalone JSON RPC clients for juded and jude-wallet-rpc.
 pub mod image;
 
-use crate::image::{JUDED_DAEMON_CONTAINER_NAME, JUDED_DEFAULT_NETWORK, RPC_PORT};
-use anyhow::{anyhow, bail, Context, Result};
-use jude_rpc::juded;
-use jude_rpc::juded::JudedRpc as _;
-use jude_rpc::wallet::{self, GetAddress, JudeWalletRpc as _, Refreshed, Transfer};
+use crate::image::{
+    judeD_DAEMON_CONTAINER_NAME, judeD_DEFAULT_NETWORK, judeD_RPC_PORT, WALLET_RPC_PORT,
+};
+use anyhow::{anyhow, bail, Result};
+use jude_rpc::{
+    juded,
+    wallet::{self, GetAddress, Refreshed, Transfer},
+};
 use std::time::Duration;
-use testcontainers::clients::Cli;
-use testcontainers::{Container, Docker, RunArgs};
+use testcontainers::{clients::Cli, core::Port, Container, Docker, RunArgs};
 use tokio::time;
 
 /// How often we mine a block.
@@ -39,71 +41,63 @@ const BLOCK_TIME_SECS: u64 = 1;
 const WAIT_WALLET_SYNC_MILLIS: u64 = 1000;
 
 #[derive(Clone, Debug)]
-pub struct Jude {
-    juded: Juded,
-    wallets: Vec<JudeWalletRpc>,
+pub struct jude {
+    juded: juded,
+    wallets: Vec<judeWalletRpc>,
+    prefix: String,
 }
-impl<'c> Jude {
+impl<'c> jude {
     /// Starts a new regtest jude container setup consisting out of 1 juded
-    /// node and n wallets. The docker container and network will be prefixed
-    /// with a randomly generated `prefix`. One miner wallet is started
-    /// automatically.
-    /// juded container name is: `prefix`_`juded`
-    /// network is: `prefix`_`jude`
-    /// miner wallet container name is: `miner`
+    /// node and n wallets. The containers and network will be prefixed, either
+    /// randomly generated or as defined in `prefix` if provided. There will
+    /// be 1 miner wallet started automatically. Default juded container
+    /// name will be: `prefix`_`juded` Default miner wallet container name
+    /// will be: `prefix`_`miner` Default network will be: `prefix`_`jude`
     pub async fn new(
         cli: &'c Cli,
-        additional_wallets: Vec<&'static str>,
-    ) -> Result<(
-        Self,
-        Container<'c, Cli, image::Juded>,
-        Vec<Container<'c, Cli, image::JudeWalletRpc>>,
-    )> {
-        let prefix = format!("{}_", random_prefix());
-        let juded_name = format!("{}{}", prefix, JUDED_DAEMON_CONTAINER_NAME);
-        let network = format!("{}{}", prefix, JUDED_DEFAULT_NETWORK);
+        prefix: Option<String>,
+        additional_wallets: Vec<String>,
+    ) -> Result<(Self, Vec<Container<'c, Cli, image::jude>>)> {
+        let prefix = format!("{}_", prefix.unwrap_or_else(random_prefix));
 
-        tracing::info!("Starting juded: {}", juded_name);
-        let (juded, juded_container) = Juded::new(cli, juded_name, network)?;
-        let mut containers = vec![];
+        let juded_name = format!("{}{}", prefix, judeD_DAEMON_CONTAINER_NAME);
+        let network = format!("{}{}", prefix, judeD_DEFAULT_NETWORK);
+
+        tracing::info!("Starting juded... {}", juded_name);
+        let (juded, juded_container) = juded::new(cli, juded_name, network)?;
+        let mut containers = vec![juded_container];
         let mut wallets = vec![];
 
-        let miner = "miner";
-        tracing::info!("Starting miner wallet: {}", miner);
-        let (miner_wallet, miner_container) =
-            JudeWalletRpc::new(cli, miner, &juded, prefix.clone()).await?;
+        let miner = format!("{}{}", prefix, "miner");
+        tracing::info!("Starting miner wallet... {}", miner);
+        let (miner_wallet, miner_container) = judeWalletRpc::new(cli, &miner, &juded).await?;
 
         wallets.push(miner_wallet);
         containers.push(miner_container);
         for wallet in additional_wallets.iter() {
-            tracing::info!("Starting wallet: {}", wallet);
-
-            // Create new wallet, the RPC sometimes has startup problems so we allow retries
-            // (drop the container that failed and try again) Times out after
-            // trying for 5 minutes
-            let (wallet, container) = tokio::time::timeout(Duration::from_secs(300), async {
-                loop {
-                    let result = JudeWalletRpc::new(cli, wallet, &juded, prefix.clone()).await;
-
-                    match result {
-                        Ok(tuple) => { return tuple; }
-                        Err(e) => { tracing::warn!("Jude wallet RPC emitted error {} - retrying to create wallet in 2 seconds...", e); }
-                    }
-                }
-            }).await.context("All retry attempts for creating a wallet exhausted")?;
-
+            tracing::info!("Starting wallet: {}...", wallet);
+            let wallet = format!("{}{}", prefix, wallet);
+            let (wallet, container) = judeWalletRpc::new(cli, &wallet, &juded).await?;
             wallets.push(wallet);
             containers.push(container);
         }
 
-        Ok((Self { juded, wallets }, juded_container, containers))
+        Ok((
+            Self {
+                juded,
+                wallets,
+                prefix,
+            },
+            containers,
+        ))
     }
 
-    pub fn juded(&self) -> &Juded {
+    pub fn juded(&self) -> &juded {
         &self.juded
     }
 
-    pub fn wallet(&self, name: &str) -> Result<&JudeWalletRpc> {
+    pub fn wallet(&self, name: &str) -> Result<&judeWalletRpc> {
+        let name = format!("{}{}", self.prefix, name);
         let wallet = self
             .wallets
             .iter()
@@ -113,55 +107,31 @@ impl<'c> Jude {
         Ok(wallet)
     }
 
-    pub async fn init_miner(&self) -> Result<()> {
+    pub async fn init(&self, wallet_amount: Vec<(&str, u64)>) -> Result<()> {
         let miner_wallet = self.wallet("miner")?;
         let miner_address = miner_wallet.address().await?.address;
 
-        // generate the first 120 as bulk
-        let amount_of_blocks = 120;
+        // generate the first 70 as bulk
         let juded = &self.juded;
-        let res = juded
-            .client()
-            .generateblocks(amount_of_blocks, miner_address.clone())
-            .await?;
+        let res = juded.client().generate_blocks(70, &miner_address).await?;
         tracing::info!("Generated {:?} blocks", res.blocks.len());
         miner_wallet.refresh().await?;
 
-        Ok(())
-    }
-
-    pub async fn init_wallet(&self, name: &str, amount_in_outputs: Vec<u64>) -> Result<()> {
-        let miner_wallet = self.wallet("miner")?;
-        let miner_address = miner_wallet.address().await?.address;
-        let juded = &self.juded;
-
-        let wallet = self.wallet(name)?;
-        let address = wallet.address().await?.address;
-
-        for amount in amount_in_outputs {
-            if amount > 0 {
-                miner_wallet.transfer(&address, amount).await?;
+        for (wallet, amount) in wallet_amount.iter() {
+            if *amount > 0 {
+                let wallet = self.wallet(wallet)?;
+                let address = wallet.address().await?.address;
+                miner_wallet.transfer(&address, *amount).await?;
                 tracing::info!("Funded {} wallet with {}", wallet.name, amount);
-                juded
-                    .client()
-                    .generateblocks(10, miner_address.clone())
-                    .await?;
+                juded.client().generate_blocks(10, &miner_address).await?;
                 wallet.refresh().await?;
             }
         }
 
-        Ok(())
-    }
-
-    pub async fn start_miner(&self) -> Result<()> {
-        let miner_wallet = self.wallet("miner")?;
-        let miner_address = miner_wallet.address().await?.address;
-        let juded = &self.juded;
-
         juded.start_miner(&miner_address).await?;
 
         tracing::info!("Waiting for miner wallet to catch up...");
-        let block_height = juded.client().get_block_count().await?.count;
+        let block_height = juded.client().get_block_count().await?;
         miner_wallet
             .wait_for_wallet_height(block_height)
             .await
@@ -169,121 +139,128 @@ impl<'c> Jude {
 
         Ok(())
     }
-
-    pub async fn init_and_start_miner(&self) -> Result<()> {
-        self.init_miner().await?;
-        self.start_miner().await?;
-
-        Ok(())
-    }
 }
 
 fn random_prefix() -> String {
     use rand::Rng;
+    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+    const LEN: usize = 4;
+    let mut rng = rand::thread_rng();
 
-    rand::thread_rng()
-        .sample_iter(rand::distributions::Alphanumeric)
-        .take(4)
-        .collect()
+    let prefix: String = (0..LEN)
+        .map(|_| {
+            let idx = rng.gen_range(0, CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect();
+    prefix
 }
 
 #[derive(Clone, Debug)]
-pub struct Juded {
+pub struct juded {
+    rpc_port: u16,
     name: String,
     network: String,
-    client: juded::Client,
 }
 
 #[derive(Clone, Debug)]
-pub struct JudeWalletRpc {
+pub struct judeWalletRpc {
+    rpc_port: u16,
     name: String,
-    client: wallet::Client,
+    network: String,
 }
 
-impl<'c> Juded {
+impl<'c> juded {
     /// Starts a new regtest jude container.
     fn new(
         cli: &'c Cli,
         name: String,
         network: String,
-    ) -> Result<(Self, Container<'c, Cli, image::Juded>)> {
-        let image = image::Juded::default();
+    ) -> Result<(Self, Container<'c, Cli, image::jude>)> {
+        let juded_rpc_port: u16 =
+            port_check::free_local_port().ok_or_else(|| anyhow!("Could not retrieve free port"))?;
+
+        let image = image::jude::default();
         let run_args = RunArgs::default()
             .with_name(name.clone())
-            .with_network(network.clone());
-        let container = cli.run_with_args(image, run_args);
-        let juded_rpc_port = container
-            .get_host_port(RPC_PORT)
-            .context("port not exposed")?;
+            .with_network(network.clone())
+            .with_mapped_port(Port {
+                local: juded_rpc_port,
+                internal: judeD_RPC_PORT,
+            });
+        let docker = cli.run_with_args(image, run_args);
 
         Ok((
             Self {
+                rpc_port: juded_rpc_port,
                 name,
                 network,
-                client: juded::Client::localhost(juded_rpc_port)?,
             },
-            container,
+            docker,
         ))
     }
 
-    pub fn client(&self) -> &juded::Client {
-        &self.client
+    pub fn client(&self) -> juded::Client {
+        juded::Client::localhost(self.rpc_port)
     }
 
     /// Spawns a task to mine blocks in a regular interval to the provided
     /// address
     pub async fn start_miner(&self, miner_wallet_address: &str) -> Result<()> {
-        let juded = self.client().clone();
+        let juded = self.client();
         let _ = tokio::spawn(mine(juded, miner_wallet_address.to_string()));
         Ok(())
     }
 }
 
-impl<'c> JudeWalletRpc {
+impl<'c> judeWalletRpc {
     /// Starts a new wallet container which is attached to
-    /// JUDED_DEFAULT_NETWORK and JUDED_DAEMON_CONTAINER_NAME
+    /// judeD_DEFAULT_NETWORK and judeD_DAEMON_CONTAINER_NAME
     async fn new(
         cli: &'c Cli,
         name: &str,
-        juded: &Juded,
-        prefix: String,
-    ) -> Result<(Self, Container<'c, Cli, image::JudeWalletRpc>)> {
-        let daemon_address = format!("{}:{}", juded.name, RPC_PORT);
-        let image = image::JudeWalletRpc::new(name, daemon_address);
+        juded: &juded,
+    ) -> Result<(Self, Container<'c, Cli, image::jude>)> {
+        let wallet_rpc_port: u16 =
+            port_check::free_local_port().ok_or_else(|| anyhow!("Could not retrieve free port"))?;
+
+        let daemon_address = format!("{}:{}", juded.name, judeD_RPC_PORT);
+        let image = image::jude::wallet(&name, daemon_address);
 
         let network = juded.network.clone();
         let run_args = RunArgs::default()
-            // prefix the container name so we can run multiple tests
-            .with_name(format!("{}{}", prefix, name))
-            .with_network(network.clone());
-        let container = cli.run_with_args(image, run_args);
-        let wallet_rpc_port = container
-            .get_host_port(RPC_PORT)
-            .context("port not exposed")?;
+            .with_name(name)
+            .with_network(network.clone())
+            .with_mapped_port(Port {
+                local: wallet_rpc_port,
+                internal: WALLET_RPC_PORT,
+            });
+        let docker = cli.run_with_args(image, run_args);
 
-        let client = wallet::Client::localhost(wallet_rpc_port)?;
-
-        client
-            .create_wallet(name.to_owned(), "English".to_owned())
-            .await?;
+        // create new wallet
+        wallet::Client::localhost(wallet_rpc_port)
+            .create_wallet(name)
+            .await
+            .unwrap();
 
         Ok((
             Self {
+                rpc_port: wallet_rpc_port,
                 name: name.to_string(),
-                client,
+                network,
             },
-            container,
+            docker,
         ))
     }
 
-    pub fn client(&self) -> &wallet::Client {
-        &self.client
+    pub fn client(&self) -> wallet::Client {
+        wallet::Client::localhost(self.rpc_port)
     }
 
     // It takes a little while for the wallet to sync with juded.
     pub async fn wait_for_wallet_height(&self, height: u32) -> Result<()> {
         let mut retry: u8 = 0;
-        while self.client().get_height().await?.height < height {
+        while self.client().block_height().await?.height < height {
             if retry >= 30 {
                 // ~30 seconds
                 bail!("Wallet could not catch up with juded after 30 retries.")
@@ -296,28 +273,26 @@ impl<'c> JudeWalletRpc {
 
     /// Sends amount to address
     pub async fn transfer(&self, address: &str, amount: u64) -> Result<Transfer> {
-        self.client().transfer_single(0, amount, address).await
+        self.client().transfer(0, amount, address).await
     }
 
     pub async fn address(&self) -> Result<GetAddress> {
-        Ok(self.client().get_address(0).await?)
+        self.client().get_address(0).await
     }
 
     pub async fn balance(&self) -> Result<u64> {
         self.client().refresh().await?;
-        let balance = self.client().get_balance(0).await?.balance;
-
-        Ok(balance)
+        self.client().get_balance(0).await
     }
 
     pub async fn refresh(&self) -> Result<Refreshed> {
-        Ok(self.client().refresh().await?)
+        self.client().refresh().await
     }
 }
 /// Mine a block ever BLOCK_TIME_SECS seconds.
 async fn mine(juded: juded::Client, reward_address: String) -> Result<()> {
     loop {
         time::sleep(Duration::from_secs(BLOCK_TIME_SECS)).await;
-        juded.generateblocks(1, reward_address.clone()).await?;
+        juded.generate_blocks(1, &reward_address).await?;
     }
 }
