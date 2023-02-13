@@ -4,7 +4,7 @@ use crate::{
     bitcoin,
     database::Database,
     execution_params::ExecutionParams,
-    jude, network,
+    jude,
     network::peer_tracker::{self, PeerTracker},
     protocol::{alice, alice::TransferProof, bob},
     seed::Seed,
@@ -79,7 +79,7 @@ impl Builder {
         alice_peer_id: PeerId,
         execution_params: ExecutionParams,
     ) -> Self {
-        let identity = network::Seed::new(seed).derive_libp2p_identity();
+        let identity = seed.derive_libp2p_identity();
 
         Self {
             swap_id,
