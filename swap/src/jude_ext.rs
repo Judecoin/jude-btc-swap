@@ -1,5 +1,5 @@
 use crate::bitcoin::Scalar;
-use ecdsa_fun::fun::marker::{NonZero, Secret};
+use ecdsa_fun::fun::marker::{Mark, NonZero, Secret};
 
 pub trait ScalarExt {
     fn to_secpfun_scalar(&self) -> ecdsa_fun::fun::Scalar;
@@ -14,7 +14,7 @@ impl ScalarExt for crate::jude::Scalar {
 
         ecdsa_fun::fun::Scalar::from_bytes(big_endian_bytes)
             .expect("valid scalar")
-            .non_zero()
+            .mark::<NonZero>()
             .expect("non-zero scalar")
     }
 }
