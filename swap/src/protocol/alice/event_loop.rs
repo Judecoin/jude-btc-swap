@@ -5,6 +5,7 @@ use crate::{
     execution_params::ExecutionParams,
     jude,
     jude::{Amount, BalanceTooLow},
+    network,
     network::{transport, TokioExecutor},
     protocol::{
         alice,
@@ -112,7 +113,7 @@ where
         rate_service: RS,
         max_sell: Amount,
     ) -> Result<(Self, mpsc::Receiver<RemoteHandle<Result<AliceState>>>)> {
-        let identity = seed.derive_libp2p_identity();
+        let identity = network::Seed::new(seed).derive_libp2p_identity();
         let behaviour = Behaviour::default();
         let transport = transport::build(&identity)?;
         let peer_id = PeerId::from(identity.public());
@@ -158,7 +159,7 @@ where
         self.peer_id
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(&mut self) {
         loop {
             tokio::select! {
                 swarm_event = self.swarm.next().fuse() => {

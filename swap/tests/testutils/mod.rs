@@ -54,23 +54,16 @@ struct BobParams {
 }
 
 impl BobParams {
-    pub fn builder(&self, event_loop_handle: bob::EventLoopHandle) -> bob::Builder {
+    pub fn builder(&self) -> bob::Builder {
         bob::Builder::new(
+            self.seed,
             Database::open(&self.db_path.clone().as_path()).unwrap(),
             self.swap_id,
             self.bitcoin_wallet.clone(),
             self.jude_wallet.clone(),
-            self.execution_params,
-            event_loop_handle,
-        )
-    }
-
-    pub fn new_eventloop(&self) -> Result<(bob::EventLoop, bob::EventLoopHandle)> {
-        bob::EventLoop::new(
-            &self.seed.derive_libp2p_identity(),
-            self.alice_peer_id,
             self.alice_address.clone(),
-            self.bitcoin_wallet.clone(),
+            self.alice_peer_id,
+            self.execution_params,
         )
     }
 }
@@ -102,16 +95,15 @@ pub struct TestContext {
 
 impl TestContext {
     pub async fn new_swap_as_bob(&mut self) -> (bob::Swap, BobEventLoopJoinHandle) {
-        let (event_loop, event_loop_handle) = self.bob_params.new_eventloop().unwrap();
-
-        let swap = self
+        let (swap, event_loop) = self
             .bob_params
-            .builder(event_loop_handle)
+            .builder()
             .with_init_params(self.btc_amount)
             .build()
+            .await
             .unwrap();
 
-        let join_handle = tokio::spawn(event_loop.run());
+        let join_handle = tokio::spawn(async move { event_loop.run().await });
 
         (swap, BobEventLoopJoinHandle(join_handle))
     }
@@ -122,11 +114,9 @@ impl TestContext {
     ) -> (bob::Swap, BobEventLoopJoinHandle) {
         join_handle.abort();
 
-        let (event_loop, event_loop_handle) = self.bob_params.new_eventloop().unwrap();
+        let (swap, event_loop) = self.bob_params.builder().build().await.unwrap();
 
-        let swap = self.bob_params.builder(event_loop_handle).build().unwrap();
-
-        let join_handle = tokio::spawn(event_loop.run());
+        let join_handle = tokio::spawn(async move { event_loop.run().await });
 
         (swap, BobEventLoopJoinHandle(join_handle))
     }
@@ -386,7 +376,7 @@ where
     )
     .await;
 
-    let (alice_event_loop, alice_swap_handle) = alice::EventLoop::new(
+    let (mut alice_event_loop, alice_swap_handle) = alice::EventLoop::new(
         alice_listen_address.clone(),
         alice_seed,
         execution_params,
@@ -400,7 +390,9 @@ where
 
     let alice_peer_id = alice_event_loop.peer_id();
 
-    tokio::spawn(alice_event_loop.run());
+    tokio::spawn(async move {
+        alice_event_loop.run().await;
+    });
 
     let bob_params = BobParams {
         seed: Seed::random().unwrap(),
@@ -614,7 +606,7 @@ async fn init_test_wallets(
         electrum_http_url,
         bitcoin::Network::Regtest,
         datadir,
-        seed.derive_extended_private_key(bitcoin::Network::Regtest)
+        seed.extended_private_key(bitcoin::Network::Regtest)
             .expect("Could not create extended private key from seed"),
     )
     .await

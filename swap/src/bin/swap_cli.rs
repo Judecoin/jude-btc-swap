@@ -31,7 +31,7 @@ use swap::{
     jude::{CreateWallet, OpenWallet},
     protocol::{
         bob,
-        bob::{cancel::CancelError, Builder, EventLoop},
+        bob::{cancel::CancelError, Builder},
     },
     seed::Seed,
 };
@@ -111,7 +111,6 @@ async fn main() -> Result<()> {
                 init_bitcoin_wallet(config, bitcoin_network, &wallet_data_dir, seed).await?;
             let jude_wallet =
                 init_jude_wallet(jude_network, jude_wallet_rpc_process.endpoint()).await?;
-            let bitcoin_wallet = Arc::new(bitcoin_wallet);
 
             let swap_id = Uuid::new_v4();
 
@@ -138,25 +137,19 @@ async fn main() -> Result<()> {
 
             let send_bitcoin = bitcoin_wallet.max_giveable(TxLock::script_size()).await?;
 
-            let (event_loop, event_loop_handle) = EventLoop::new(
-                &seed.derive_libp2p_identity(),
-                alice_peer_id,
-                alice_addr,
-                bitcoin_wallet.clone(),
-            )?;
-            let handle = tokio::spawn(event_loop.run());
-
-            let swap = Builder::new(
+            let bob_factory = Builder::new(
+                seed,
                 db,
                 swap_id,
-                bitcoin_wallet.clone(),
+                Arc::new(bitcoin_wallet),
                 Arc::new(jude_wallet),
+                alice_addr,
+                alice_peer_id,
                 execution_params,
-                event_loop_handle,
-            )
-            .with_init_params(send_bitcoin)
-            .build()?;
+            );
+            let (swap, event_loop) = bob_factory.with_init_params(send_bitcoin).build().await?;
 
+            let handle = tokio::spawn(async move { event_loop.run().await });
             let swap = bob::run(swap);
             tokio::select! {
                 event_loop_result = handle => {
@@ -188,26 +181,19 @@ async fn main() -> Result<()> {
                 init_bitcoin_wallet(config, bitcoin_network, &wallet_data_dir, seed).await?;
             let jude_wallet =
                 init_jude_wallet(jude_network, jude_wallet_rpc_process.endpoint()).await?;
-            let bitcoin_wallet = Arc::new(bitcoin_wallet);
 
-            let (event_loop, event_loop_handle) = EventLoop::new(
-                &seed.derive_libp2p_identity(),
-                alice_peer_id,
-                alice_addr,
-                bitcoin_wallet.clone(),
-            )?;
-            let handle = tokio::spawn(event_loop.run());
-
-            let swap = Builder::new(
+            let bob_factory = Builder::new(
+                seed,
                 db,
                 swap_id,
-                bitcoin_wallet.clone(),
+                Arc::new(bitcoin_wallet),
                 Arc::new(jude_wallet),
+                alice_addr,
+                alice_peer_id,
                 execution_params,
-                event_loop_handle,
-            )
-            .build()?;
-
+            );
+            let (swap, event_loop) = bob_factory.build().await?;
+            let handle = tokio::spawn(async move { event_loop.run().await });
             let swap = bob::run(swap);
             tokio::select! {
                 event_loop_result = handle => {
@@ -270,7 +256,7 @@ async fn init_bitcoin_wallet(
         config.bitcoin.electrum_http_url,
         bitcoin_network,
         bitcoin_wallet_data_dir,
-        seed.derive_extended_private_key(bitcoin_network)?,
+        seed.extended_private_key(bitcoin_network)?,
     )
     .await?;
 
