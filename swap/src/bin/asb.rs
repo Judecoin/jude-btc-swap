@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
     let wallet_data_dir = config.data.dir.join("wallet");
 
     match opt.cmd {
-        Command::Start { max_buy } => {
+        Command::Start { max_sell } => {
             let seed = Seed::from_file_or_generate(&config.data.dir)
                 .expect("Could not retrieve/initialize seed");
 
@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
                 Arc::new(jude_wallet),
                 Arc::new(db),
                 rate_service,
-                max_buy,
+                max_sell,
             )
             .unwrap();
 
@@ -165,16 +165,13 @@ async fn init_wallets(
     );
 
     // Setup the jude wallet
-    let open_wallet_response = jude_wallet.open_wallet(DEFAULT_WALLET_NAME).await;
+    let open_wallet_response = jude_wallet.open().await;
     if open_wallet_response.is_err() {
-        jude_wallet
-            .create_wallet(DEFAULT_WALLET_NAME)
-            .await
-            .context(format!(
-                "Unable to create jude wallet.\
+        jude_wallet.create().await.context(format!(
+            "Unable to create jude wallet.\
              Please ensure that the jude-wallet-rpc is available at {}",
-                config.jude.wallet_rpc_url
-            ))?;
+            config.jude.wallet_rpc_url
+        ))?;
 
         info!("Created jude wallet {}", DEFAULT_WALLET_NAME);
     } else {

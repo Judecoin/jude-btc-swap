@@ -1,5 +1,5 @@
-use crate::bitcoin::Amount;
-use bitcoin::{util::amount::ParseAmountError, Denomination};
+use crate::jude::Amount;
+use anyhow::Result;
 use std::path::PathBuf;
 
 #[derive(structopt::StructOpt, Debug)]
@@ -19,12 +19,13 @@ pub struct Arguments {
 #[structopt(name = "jude_btc-swap", about = "jude BTC atomic swap")]
 pub enum Command {
     Start {
-        #[structopt(long = "max-buy-btc", help = "The maximum amount of BTC the ASB is willing to buy.", default_value="0.005", parse(try_from_str = parse_btc))]
-        max_buy: Amount,
+        #[structopt(long = "max-sell-jude", help = "The maximum amount of jude the ASB is willing to sell.", default_value="0.5", parse(try_from_str = parse_jude))]
+        max_sell: Amount,
     },
     History,
 }
 
-fn parse_btc(s: &str) -> Result<Amount, ParseAmountError> {
-    Amount::from_str_in(s, Denomination::Bitcoin)
+fn parse_jude(str: &str) -> Result<Amount> {
+    let amount = Amount::parse_jude(str)?;
+    Ok(amount)
 }
