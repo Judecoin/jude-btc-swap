@@ -1,5 +1,5 @@
 use crate::jude::{
-    Amount, CreateWallet, CreateWalletForOutput, CreateWalletForOutputThenLoadDefaultWallet,
+    Amount, CreateWallet, CreateWalletForOutput, CreateWalletForOutputThenReloadWallet,
     InsufficientFunds, OpenWallet, PrivateViewKey, PublicViewKey, Transfer, TransferProof, TxHash,
     WatchForTransfer,
 };
@@ -21,27 +21,23 @@ use url::Url;
 pub struct Wallet {
     inner: Mutex<wallet::Client>,
     network: Network,
-    default_wallet_name: String,
+    name: String,
 }
 
 impl Wallet {
-    pub fn new(url: Url, network: Network, default_wallet_name: String) -> Self {
+    pub fn new(url: Url, network: Network, name: String) -> Self {
         Self {
             inner: Mutex::new(wallet::Client::new(url)),
             network,
-            default_wallet_name,
+            name,
         }
     }
 
-    pub fn new_with_client(
-        client: wallet::Client,
-        network: Network,
-        default_wallet_name: String,
-    ) -> Self {
+    pub fn new_with_client(client: wallet::Client, network: Network, name: String) -> Self {
         Self {
             inner: Mutex::new(client),
             network,
-            default_wallet_name,
+            name,
         }
     }
 
@@ -133,8 +129,8 @@ impl CreateWalletForOutput for Wallet {
 }
 
 #[async_trait]
-impl CreateWalletForOutputThenLoadDefaultWallet for Wallet {
-    async fn create_and_load_wallet_for_output_then_load_default_wallet(
+impl CreateWalletForOutputThenReloadWallet for Wallet {
+    async fn create_and_load_wallet_for_output_then_reload_wallet(
         &self,
         private_spend_key: PrivateKey,
         private_view_key: PrivateViewKey,
@@ -156,9 +152,7 @@ impl CreateWalletForOutputThenLoadDefaultWallet for Wallet {
             )
             .await?;
 
-        let _ = wallet
-            .open_wallet(self.default_wallet_name.as_str())
-            .await?;
+        let _ = wallet.open_wallet(self.name.as_str()).await?;
 
         Ok(())
     }
@@ -170,7 +164,7 @@ impl OpenWallet for Wallet {
         self.inner
             .lock()
             .await
-            .open_wallet(self.default_wallet_name.as_str())
+            .open_wallet(self.name.as_str())
             .await?;
         Ok(())
     }
@@ -178,8 +172,12 @@ impl OpenWallet for Wallet {
 
 #[async_trait]
 impl CreateWallet for Wallet {
-    async fn create_wallet(&self, file_name: &str) -> Result<()> {
-        self.inner.lock().await.create_wallet(file_name).await?;
+    async fn create(&self) -> Result<()> {
+        self.inner
+            .lock()
+            .await
+            .create_wallet(self.name.as_str())
+            .await?;
         Ok(())
     }
 }
