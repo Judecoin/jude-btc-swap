@@ -597,7 +597,7 @@ async fn init_test_wallets(
     let jude_wallet = swap::jude::Wallet::new_with_client(
         jude.wallet(name).unwrap().client(),
         jude::Network::default(),
-        "irrelevant_for_tests".to_string(),
+        name.to_string(),
     );
 
     let electrum_rpc_url = {

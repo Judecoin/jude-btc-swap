@@ -12,7 +12,7 @@ async fn init_miner_and_mine_to_miner_address() {
     let _guard = init_tracing();
 
     let tc = Cli::default();
-    let (jude, _juded_container) = jude::new(&tc, None, vec![]).await.unwrap();
+    let (jude, _juded_container) = jude::new(&tc, vec![]).await.unwrap();
 
     jude.init(vec![]).await.unwrap();
 
