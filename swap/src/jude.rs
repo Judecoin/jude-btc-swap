@@ -229,8 +229,8 @@ pub trait CreateWalletForOutput {
 }
 
 #[async_trait]
-pub trait CreateWalletForOutputThenReloadWallet {
-    async fn create_and_load_wallet_for_output_then_reload_wallet(
+pub trait CreateWalletForOutputThenLoadDefaultWallet {
+    async fn create_and_load_wallet_for_output_then_load_default_wallet(
         &self,
         private_spend_key: PrivateKey,
         private_view_key: PrivateViewKey,
@@ -240,12 +240,12 @@ pub trait CreateWalletForOutputThenReloadWallet {
 
 #[async_trait]
 pub trait OpenWallet {
-    async fn open(&self) -> Result<()>;
+    async fn open_wallet(&self, file_name: &str) -> Result<()>;
 }
 
 #[async_trait]
 pub trait CreateWallet {
-    async fn create(&self) -> Result<()>;
+    async fn create_wallet(&self, file_name: &str) -> Result<()>;
 }
 
 #[async_trait]

@@ -16,9 +16,12 @@ async fn fund_transfer_and_check_tx_key() {
     let send_to_bob = 5_000_000_000;
 
     let tc = Cli::default();
-    let (jude, _containers) = jude::new(&tc, vec!["alice".to_string(), "bob".to_string()])
-        .await
-        .unwrap();
+    let (jude, _containers) = jude::new(&tc, Some("test_".to_string()), vec![
+        "alice".to_string(),
+        "bob".to_string(),
+    ])
+    .await
+    .unwrap();
     let alice_wallet = jude.wallet("alice").unwrap();
     let bob_wallet = jude.wallet("bob").unwrap();
 

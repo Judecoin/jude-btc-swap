@@ -44,42 +44,52 @@ const WAIT_WALLET_SYNC_MILLIS: u64 = 1000;
 pub struct jude {
     juded: juded,
     wallets: Vec<judeWalletRpc>,
+    prefix: String,
 }
 impl<'c> jude {
     /// Starts a new regtest jude container setup consisting out of 1 juded
-    /// node and n wallets. The docker container and network will be prefixed
-    /// with a randomly generated `prefix`. One miner wallet is started
-    /// automatically.
-    /// juded container name is: `prefix`_`juded`
-    /// network is: `prefix`_`jude`
-    /// miner wallet container name is: `miner`
+    /// node and n wallets. The containers and network will be prefixed, either
+    /// randomly generated or as defined in `prefix` if provided. There will
+    /// be 1 miner wallet started automatically. Default juded container
+    /// name will be: `prefix`_`juded` Default miner wallet container name
+    /// will be: `prefix`_`miner` Default network will be: `prefix`_`jude`
     pub async fn new(
         cli: &'c Cli,
+        prefix: Option<String>,
         additional_wallets: Vec<String>,
     ) -> Result<(Self, Vec<Container<'c, Cli, image::jude>>)> {
-        let prefix = format!("{}_", random_prefix());
+        let prefix = format!("{}_", prefix.unwrap_or_else(random_prefix));
+
         let juded_name = format!("{}{}", prefix, judeD_DAEMON_CONTAINER_NAME);
         let network = format!("{}{}", prefix, judeD_DEFAULT_NETWORK);
 
-        tracing::info!("Starting juded: {}", juded_name);
+        tracing::info!("Starting juded... {}", juded_name);
         let (juded, juded_container) = juded::new(cli, juded_name, network)?;
         let mut containers = vec![juded_container];
         let mut wallets = vec![];
 
-        let miner = "miner";
-        tracing::info!("Starting miner wallet: {}", miner);
+        let miner = format!("{}{}", prefix, "miner");
+        tracing::info!("Starting miner wallet... {}", miner);
         let (miner_wallet, miner_container) = judeWalletRpc::new(cli, &miner, &juded).await?;
 
         wallets.push(miner_wallet);
         containers.push(miner_container);
         for wallet in additional_wallets.iter() {
-            tracing::info!("Starting wallet: {}", wallet);
+            tracing::info!("Starting wallet: {}...", wallet);
+            let wallet = format!("{}{}", prefix, wallet);
             let (wallet, container) = judeWalletRpc::new(cli, &wallet, &juded).await?;
             wallets.push(wallet);
             containers.push(container);
         }
 
-        Ok((Self { juded, wallets }, containers))
+        Ok((
+            Self {
+                juded,
+                wallets,
+                prefix,
+            },
+            containers,
+        ))
     }
 
     pub fn juded(&self) -> &juded {
@@ -87,6 +97,7 @@ impl<'c> jude {
     }
 
     pub fn wallet(&self, name: &str) -> Result<&judeWalletRpc> {
+        let name = format!("{}{}", self.prefix, name);
         let wallet = self
             .wallets
             .iter()

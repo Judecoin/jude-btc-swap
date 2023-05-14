@@ -7,7 +7,7 @@ use crate::{
     database::Database,
     execution_params::ExecutionParams,
     jude,
-    jude::CreateWalletForOutputThenReloadWallet,
+    jude::CreateWalletForOutputThenLoadDefaultWallet,
     jude_ext::ScalarExt,
     protocol::{
         alice,
@@ -392,7 +392,7 @@ async fn run_until_internal(
                 let view_key = state3.v;
 
                 jude_wallet
-                    .create_and_load_wallet_for_output_then_reload_wallet(
+                    .create_and_load_wallet_for_output_then_load_default_wallet(
                         spend_key,
                         view_key,
                         jude_wallet_restore_blockheight,

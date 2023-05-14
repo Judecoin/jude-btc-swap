@@ -293,13 +293,18 @@ async fn init_jude_wallet(
     );
 
     // Setup the temporary jude wallet necessary for monitoring the blockchain
-    let open_monitoring_wallet_response = jude_wallet.open().await;
+    let open_monitoring_wallet_response = jude_wallet
+        .open_wallet(jude_BLOCKCHAIN_MONITORING_WALLET_NAME)
+        .await;
     if open_monitoring_wallet_response.is_err() {
-        jude_wallet.create().await.context(format!(
-            "Unable to create jude wallet for blockchain monitoring.\
+        jude_wallet
+            .create_wallet(jude_BLOCKCHAIN_MONITORING_WALLET_NAME)
+            .await
+            .context(format!(
+                "Unable to create jude wallet for blockchain monitoring.\
              Please ensure that the jude-wallet-rpc is available at {}",
-            jude_wallet_rpc_url
-        ))?;
+                jude_wallet_rpc_url
+            ))?;
 
         debug!(
             "Created jude wallet for blockchain monitoring with name {}",

@@ -33,9 +33,7 @@ use tracing_log::LogTracer;
 use url::Url;
 use uuid::Uuid;
 
-const jude_WALLET_NAME_BOB: &str = "bob";
-const jude_WALLET_NAME_ALICE: &str = "alice";
-const BITCOIN_TEST_WALLET_NAME: &str = "testwallet";
+const TEST_WALLET_NAME: &str = "testwallet";
 
 #[derive(Debug, Clone)]
 pub struct StartingBalances {
@@ -355,7 +353,7 @@ where
     let bob_seed = Seed::random().unwrap();
 
     let (alice_bitcoin_wallet, alice_jude_wallet) = init_test_wallets(
-        jude_WALLET_NAME_ALICE,
+        "alice",
         containers.bitcoind_url.clone(),
         &jude,
         alice_starting_balances.clone(),
@@ -377,7 +375,7 @@ where
     };
 
     let (bob_bitcoin_wallet, bob_jude_wallet) = init_test_wallets(
-        jude_WALLET_NAME_BOB,
+        "bob",
         containers.bitcoind_url,
         &jude,
         bob_starting_balances.clone(),
@@ -396,7 +394,7 @@ where
         alice_jude_wallet.clone(),
         alice_db,
         fixed_rate::RateService::default(),
-        alice_starting_balances.jude,
+        bitcoin::Amount::ONE_BTC,
     )
     .unwrap();
 
@@ -531,11 +529,11 @@ async fn init_bitcoind(node_url: Url, spendable_quantity: u32) -> Result<Client>
     let bitcoind_client = Client::new(node_url.clone());
 
     bitcoind_client
-        .createwallet(BITCOIN_TEST_WALLET_NAME, None, None, None, None)
+        .createwallet(TEST_WALLET_NAME, None, None, None, None)
         .await?;
 
     let reward_address = bitcoind_client
-        .with_wallet(BITCOIN_TEST_WALLET_NAME)?
+        .with_wallet(TEST_WALLET_NAME)?
         .getnewaddress(None, None)
         .await?;
 
@@ -552,12 +550,12 @@ pub async fn mint(node_url: Url, address: bitcoin::Address, amount: bitcoin::Amo
     let bitcoind_client = Client::new(node_url.clone());
 
     bitcoind_client
-        .send_to_address(BITCOIN_TEST_WALLET_NAME, address.clone(), amount)
+        .send_to_address(TEST_WALLET_NAME, address.clone(), amount)
         .await?;
 
     // Confirm the transaction
     let reward_address = bitcoind_client
-        .with_wallet(BITCOIN_TEST_WALLET_NAME)?
+        .with_wallet(TEST_WALLET_NAME)?
         .getnewaddress(None, None)
         .await?;
     bitcoind_client
@@ -573,12 +571,9 @@ async fn init_jude_container(
     jude,
     Vec<Container<'_, Cli, jude_harness::image::jude>>,
 ) {
-    let (jude, judeds) = jude::new(&cli, vec![
-        jude_WALLET_NAME_ALICE.to_string(),
-        jude_WALLET_NAME_BOB.to_string(),
-    ])
-    .await
-    .unwrap();
+    let (jude, judeds) = jude::new(&cli, None, vec!["alice".to_string(), "bob".to_string()])
+        .await
+        .unwrap();
 
     (jude, judeds)
 }
@@ -602,7 +597,7 @@ async fn init_test_wallets(
     let jude_wallet = swap::jude::Wallet::new_with_client(
         jude.wallet(name).unwrap().client(),
         jude::Network::default(),
-        name.to_string(),
+        "irrelevant_for_tests".to_string(),
     );
 
     let electrum_rpc_url = {
