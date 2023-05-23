@@ -394,7 +394,7 @@ where
         alice_jude_wallet.clone(),
         alice_db,
         fixed_rate::RateService::default(),
-        bitcoin::Amount::ONE_BTC,
+        alice_starting_balances.jude,
     )
     .unwrap();
 
