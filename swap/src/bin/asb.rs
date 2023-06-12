@@ -167,14 +167,11 @@ async fn init_wallets(
     // Setup the jude wallet
     let open_wallet_response = jude_wallet.open().await;
     if open_wallet_response.is_err() {
-        jude_wallet
-            .create_wallet(DEFAULT_WALLET_NAME)
-            .await
-            .context(format!(
-                "Unable to create jude wallet.\
+        jude_wallet.create().await.context(format!(
+            "Unable to create jude wallet.\
              Please ensure that the jude-wallet-rpc is available at {}",
-                config.jude.wallet_rpc_url
-            ))?;
+            config.jude.wallet_rpc_url
+        ))?;
 
         info!("Created jude wallet {}", DEFAULT_WALLET_NAME);
     } else {

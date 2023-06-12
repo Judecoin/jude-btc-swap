@@ -19,7 +19,7 @@ pub struct Arguments {
 #[structopt(name = "jude_btc-swap", about = "jude BTC atomic swap")]
 pub enum Command {
     Start {
-        #[structopt(long = "max-sell-jude", help = "The maximum amount of jude the ASB is willing to sell.", default_value="0.0", parse(try_from_str = parse_jude))]
+        #[structopt(long = "max-sell-jude", help = "The maximum amount of jude the ASB is willing to sell.", default_value="0.5", parse(try_from_str = parse_jude))]
         max_sell: Amount,
     },
     History,
